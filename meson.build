@@ -324,6 +324,11 @@ test_formats = executable('test_formats',
     dependencies: [libdrmtap_test_dep],
     include_directories: lib_include,
 )
+test_cursor = executable('test_cursor',
+    'tests/test_cursor.c',
+    dependencies: [libdrmtap_test_dep],
+    include_directories: lib_include,
+)
 test_deswizzle = executable('test_deswizzle',
     'tests/test_deswizzle.c',
     # libdrm too: the modifiers under test are built with fourcc_mod_code() from
@@ -379,6 +384,7 @@ test('hdr', test_hdr, suite: 'unit')
 test('wire', test_wire, suite: 'unit')
 test('convert', test_convert, suite: 'unit')
 test('connector_names', test_connector_names, suite: 'unit')
+test('cursor', test_cursor, suite: 'unit')
 
 # Integration tests (need vkms or real GPU)
 # LSan: suppress the deliberate process-lifetime EGL/Mesa display allocation

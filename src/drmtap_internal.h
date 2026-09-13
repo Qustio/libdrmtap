@@ -256,6 +256,14 @@ typedef struct {
  * lacks CAP_SYS_ADMIN). Populates `cursor` (allocates cursor->pixels). */
 int drmtap_helper_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 
+/* Classify a direct cursor-framebuffer read that produced no pixels: 1 if the
+ * privileged helper should be tried, 0 if this is transient and the poll should
+ * be skipped. `fb2_ok` is whether drmModeGetFB2 returned a struct; `err` is errno
+ * captured right after a NULL return (used only when !fb2_ok); `had_handle` is
+ * whether that struct carried a GEM handle (used only when fb2_ok). Pure, so the
+ * privilege-vs-race decision is unit-tested without a DRM device. */
+int drmtap_cursor_needs_helper(int fb2_ok, int err, int had_handle);
+
 /* GPU backend: generic linear (gpu_generic.c) */
 int drmtap_gpu_generic_match(const char *driver);
 int drmtap_gpu_generic_process(drmtap_ctx *ctx, void *data,

@@ -125,6 +125,20 @@ static uint32_t find_cursor_plane(drmtap_ctx *ctx) {
 /* Public API                                                                */
 /* ========================================================================= */
 
+/* See drmtap_internal.h. The helper is only worth a fork/exec when the direct
+ * read failed for lack of privilege: a GETFB2 the kernel refused with EACCES or
+ * EPERM, or one that succeeded but returned no GEM handle (the result an
+ * unprivileged caller gets). Every other case is transient or a resource limit
+ * the helper cannot improve: a retired fb_id (a cursor shape-change race, usually
+ * ENOENT), or a handle we could not turn into pixels. Those the next poll clears,
+ * and the consumer keeps the current shape meanwhile. */
+int drmtap_cursor_needs_helper(int fb2_ok, int err, int had_handle) {
+    if (!fb2_ok) {
+        return err == EACCES || err == EPERM;
+    }
+    return had_handle == 0;
+}
+
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     if (!ctx || !cursor) {
         return -EINVAL;
@@ -188,16 +202,36 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     /* Get cursor framebuffer info */
     drmModeFB2 *fb2 = drmModeGetFB2(ctx->drm_fd, plane->fb_id);
     if (!fb2) {
-        /* No direct privilege to read the cursor framebuffer — go via helper. */
+        /* Two very different failures land here. A kernel that refuses GETFB2 to
+         * a non-master caller signals a lack of privilege (EACCES/EPERM), which
+         * is the helper's job. Any other errno — typically ENOENT — means the
+         * fb_id was retired between the plane read above and this call, a race
+         * with a cursor shape change that the helper cannot fix. Fork only for
+         * the privilege case; treat the race as a transient miss. */
+        int err = errno;
+        uint32_t fb_id = plane->fb_id;
         drmModeFreePlane(plane);
-        return drmtap_helper_get_cursor(ctx, cursor);
+        if (drmtap_cursor_needs_helper(0, err, 0)) {
+            return drmtap_helper_get_cursor(ctx, cursor);
+        }
+        drmtap_debug_log(ctx,
+            "cursor: fb %u unreadable (%s); transient, keeping the current shape",
+            fb_id, strerror(err));
+        cursor->pixels = NULL;
+        return 0;
     }
 
     cursor->width = fb2->width;
     cursor->height = fb2->height;
 
+    /* GETFB2 hands back a GEM handle only to a privileged caller; its absence is
+     * the signal we lack that privilege. Captured before fb2 is freed, so the
+     * final decision below can tell "no privilege" from "had a handle but could
+     * not read it". */
+    int had_handle = (fb2->handles[0] != 0);
+
     /* Try to mmap cursor pixels if we have a handle */
-    if (fb2->handles[0] != 0) {
+    if (had_handle) {
         int prime_fd = -1;
         int ret = drmPrimeHandleToFD(ctx->drm_fd, fb2->handles[0],
                                      O_RDONLY | O_CLOEXEC, &prime_fd);
@@ -274,11 +308,18 @@ int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor) {
     drmModeFreeFB2(fb2);
     drmModeFreePlane(plane);
 
-    /* If the framebuffer existed but its handle wasn't readable (handles[0]==0,
-     * i.e. we lack CAP_SYS_ADMIN), we have a visible cursor but no pixels — read
-     * it through the privileged helper instead. */
+    /* A visible cursor with no pixels has two causes and only one wants the
+     * helper. No GEM handle means GETFB2 gave us the fb but not the privilege to
+     * read it (no CAP_SYS_ADMIN / not DRM master): the helper's job. Having had a
+     * handle but still no pixels — the prime export, the mmap, the size cap or the
+     * alloc — is transient or a resource limit the helper cannot improve, so skip
+     * this poll and let the consumer keep the current shape. */
     if (cursor->visible && cursor->pixels == NULL) {
-        return drmtap_helper_get_cursor(ctx, cursor);
+        if (drmtap_cursor_needs_helper(1, 0, had_handle)) {
+            return drmtap_helper_get_cursor(ctx, cursor);
+        }
+        drmtap_debug_log(ctx,
+            "cursor: fb readable but no pixels this poll; transient, keeping shape");
     }
 
     drmtap_debug_log(ctx, "cursor: %ux%u at (%d,%d) hotspot=(%d,%d) %s",
