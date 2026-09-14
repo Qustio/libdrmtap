@@ -30,3 +30,6 @@ option('helper', type: 'feature', value: 'auto',
 #   'disabled': build the stub even where the headers exist.
 option('egl', type: 'feature', value: 'auto',
     description: 'Build the EGL/GLES2 GPU detiling backend (requires egl + glesv2 headers)')
+
+option('server', type: 'feature', value: 'auto',
+    description: 'Build libdrmtap_server')

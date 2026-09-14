@@ -302,6 +302,64 @@ executable('drmtap-helper',
 endif # build_helper
 
 # ============================================================================
+# Server (lib used by privileged process)
+# ============================================================================
+build_server = get_option('server').enabled()
+
+if build_server
+server_deps = [libdrm_dep, seccomp_dep, libcap_dep]
+server_c_args = ['-DHAVE_SECCOMP=1', '-DHAVE_LIBCAP=1']
+
+if get_option('optimization') not in ['plain', '0']
+    server_c_args += ['-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=2']
+endif
+server_link_args = ['-Wl,-z,relro,-z,now']
+if cc.has_link_argument('-Wl,--version-script,' + version_script)
+    server_link_args += '-Wl,--version-script,' + version_script
+endif
+
+libdrmtap_server_deps = [libdrmtap_dep, threads_dep, seccomp_dep, libcap_dep]
+
+libdrmtap_server = both_libraries('drmtap_server',
+    'src/server.c',
+    include_directories: lib_include,
+    dependencies: libdrmtap_server_deps,
+    version: meson.project_version(),
+    soversion: '0',
+    c_args: server_c_args,
+    link_args: server_link_args,
+    link_depends: 'libdrmtap.map',
+    install: true,
+)
+
+libdrmtap_server_dep = declare_dependency(
+    link_with: libdrmtap_server,
+    include_directories: lib_include,
+)
+
+executable('server',
+    'examples/server.c',
+    dependencies: [libdrmtap_server_dep],
+    c_args: helper_c_args,
+    link_args: helper_link_args,
+    pie: true,
+    install: true,
+    install_dir: get_option('libexecdir'),
+    install_mode: ['rwxr-x---', 'root', 'root'],
+)
+
+executable('screenshot_server',
+    'examples/screenshot_server.c',
+    dependencies: [libdrmtap_server_dep, libdrmtap_dep],
+    c_args: helper_c_args,
+    link_args: helper_link_args,
+    pie: true,
+    install: true,
+    install_dir: get_option('libexecdir'),
+)
+endif # build_server
+
+# ============================================================================
 # Tests
 # ============================================================================
 
