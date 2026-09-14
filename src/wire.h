@@ -129,14 +129,15 @@ static inline int wire_send_fd(int sock, int fd, const void *meta, size_t meta_l
     iov.iov_len = meta_len;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.buf;
-    msg.msg_controllen = sizeof(cmsg_buf.buf);
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
-
+    if (fd >= 0) {
+        msg.msg_control = cmsg_buf.buf;
+        msg.msg_controllen = sizeof(cmsg_buf.buf);
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+        cm->cmsg_level = SOL_SOCKET;
+        cm->cmsg_type = SCM_RIGHTS;
+        cm->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cm), &fd, sizeof(int));
+    }
     ssize_t n;
     do {
         n = sendmsg(sock, &msg, MSG_NOSIGNAL);
