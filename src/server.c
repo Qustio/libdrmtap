@@ -474,7 +474,7 @@ static void *worker_main(void *arg) {
     }
 
 #ifdef HAVE_LIBCAP
-    strerror(EINVAL); // cache glibc strerror to prevent lazy loading with openat()
+    (void)strerror(EINVAL); // cache glibc strerror to prevent lazy loading with openat()
     if (drop_caps() != 0) {
         set_error(srv, "could not drop capabilities");
         report_startup_result(srv, 0);
