@@ -28,7 +28,7 @@
 #define _GNU_SOURCE
 #include "drmtap_server.h"
 #include "server_wire.h"
-#include "../src/wire.h"
+#include "wire.h"
 #include "drmtap.h"
 
 #include <stdio.h>

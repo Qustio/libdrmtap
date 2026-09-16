@@ -20,7 +20,7 @@
 #include <sys/mman.h>
 #include <dirent.h>
 
-#include "../src/wire.h"
+#include "../include/wire.h"
 
 /* Count entries under /proc/self/fd. Only the DELTA across a call matters (the
  * transient dir fd + '.'/'..' cancel out), so this detects a descriptor leak. */

@@ -46,7 +46,7 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/un.h>
-#include "../src/wire.h"
+#include "../include/wire.h"
 #include <sys/prctl.h>
 #include <limits.h>
 
