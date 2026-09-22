@@ -88,7 +88,9 @@ static inline int wire_cmd_valid(const helper_cmd_grab_t *c) {
     return c->magic == HELPER_PROTO_MAGIC &&
            c->version == HELPER_PROTO_VERSION &&
            c->length == (uint32_t)sizeof(helper_cmd_grab_t) &&
-           (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR || c->type == CMD_QUIT);
+           (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR ||
+            c->type == CMD_GET_CURSOR2 || c->type == CMD_LIST_DISPLAYS ||
+            c->type == CMD_QUIT);
 }
 
 /* Send exactly len bytes, handling partial writes and EINTR. 0 ok, -1 error. */
