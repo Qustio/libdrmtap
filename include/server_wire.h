@@ -55,4 +55,24 @@ typedef struct {
                                  this struct on the wire when data_size > 0 */
 } drmtap_server_cursor_reply_t;
 
+/* CMD_LIST_DISPLAYS reply: a drmtap_server_list_reply_t header giving `count`,
+ * followed immediately on the wire by exactly `count` drmtap_server_display_t
+ * entries. `id` is the entry's 0-based position in that list — it is what
+ * CMD_GRAB/CMD_GET_CURSOR expect back in helper_cmd_grab_t.crtc_id (the field
+ * is reused as a display index for this protocol, NOT a real DRM crtc id;
+ * `crtc_id` below is included for diagnostics only, do not build protocol
+ * logic on it). `id` is stable only for the lifetime of one server run. */
+typedef struct {
+    uint32_t count;
+} drmtap_server_list_reply_t;
+
+typedef struct {
+    uint32_t id;
+    uint32_t crtc_id;
+    char     name[32];
+    int32_t  x, y;
+    uint32_t width, height;
+    uint32_t refresh_hz;
+} drmtap_server_display_t;
+
 #endif /* DRMTAP_SERVER_WIRE_H */

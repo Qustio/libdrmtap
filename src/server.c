@@ -169,9 +169,14 @@ static int install_seccomp(void) {
 }
 #endif
 
+#define DRMTAP_SERVER_MAX_DISPLAYS 16
+
 struct drmtap_server {
     /* Owned and used exclusively by the worker thread from open to close. */
-    drmtap_ctx *ctx;
+    drmtap_ctx *ctx[DRMTAP_SERVER_MAX_DISPLAYS];
+    uint32_t crtc_id[DRMTAP_SERVER_MAX_DISPLAYS];
+    drmtap_display info[DRMTAP_SERVER_MAX_DISPLAYS];
+    int num_displays;
     int listen_fd;
     int active_fd;            /* connection currently being served, or -1;
                                   guarded by `lock` so drmtap_server_stop()
@@ -302,13 +307,21 @@ static int bind_listen_socket(drmtap_server *srv) {
 /* Per-connection command dispatch                                           */
 /* ========================================================================= */
 
-static void handle_grab(drmtap_server *srv, int fd) {
+static void handle_grab(drmtap_server *srv, int fd, size_t screen_id) {
     drmtap_server_grab_reply_t reply;
     memset(&reply, 0, sizeof(reply));
+
+    if (screen_id > (size_t)srv->num_displays) {
+        reply.status = DRMTAP_SERVER_GRAB_ERROR;
+        wire_send_fd(fd, -1, &reply, sizeof(reply));
+        return;
+    }
+    drmtap_ctx *ctx = srv->ctx[screen_id];
+
     drmtap_frame_info frame;
     memset(&frame, 0, sizeof(frame));
 
-    int gret = drmtap_grab_desc(srv->ctx, &reply.desc, &frame);
+    int gret = drmtap_grab_desc(ctx, &reply.desc, &frame);
     int fd_to_send = -1;
     if (gret == 0) {
         reply.status = DRMTAP_SERVER_GRAB_OK;   
@@ -319,7 +332,7 @@ static void handle_grab(drmtap_server *srv, int fd) {
         reply.status = DRMTAP_SERVER_GRAB_ERROR;
         if (srv->debug) {
             fprintf(stderr, "[drmtap_server] grab_desc failed (%d): %s\n",
-                    gret, drmtap_error(srv->ctx) ? drmtap_error(srv->ctx) : "");
+                    gret, drmtap_error(ctx) ? drmtap_error(ctx) : "");
         }
     }
 
@@ -328,19 +341,25 @@ static void handle_grab(drmtap_server *srv, int fd) {
         /* Release AFTER sending: sendmsg() has already dup'd the fd into the
          * kernel's socket-layer queue for the peer, so releasing our own copy
          * now is safe (same order examples/split_capture.c uses). */
-        drmtap_frame_release(srv->ctx, &frame);
+        drmtap_frame_release(ctx, &frame);
     }
     (void)send_ret; /* a failed send just ends the connection; caller detects
                         it on the next recv and returns */
 }
 
-static void handle_get_cursor(drmtap_server *srv, int fd) {
+static void handle_get_cursor(drmtap_server *srv, int fd, size_t screen_id) {
     drmtap_server_cursor_reply_t reply;
     memset(&reply, 0, sizeof(reply));
     drmtap_cursor_info cursor;
     memset(&cursor, 0, sizeof(cursor));
 
-    int cret = drmtap_get_cursor(srv->ctx, &cursor);
+    if (screen_id > (size_t)srv->num_displays) {
+        wire_send_fd(fd, -1, &reply, sizeof(reply));
+        return;
+    }
+    drmtap_ctx *ctx = srv->ctx[screen_id];
+
+    int cret = drmtap_get_cursor(ctx, &cursor);
     if (cret == 0) {
         reply.x = cursor.x;
         reply.y = cursor.y;
@@ -354,13 +373,37 @@ static void handle_get_cursor(drmtap_server *srv, int fd) {
                                : 0u;
     } else if (srv->debug) {
         fprintf(stderr, "[drmtap_server] get_cursor failed (%d): %s\n",
-                cret, drmtap_error(srv->ctx) ? drmtap_error(srv->ctx) : "");
+                cret, drmtap_error(ctx) ? drmtap_error(ctx) : "");
     }
 
     if (wire_send_fd(fd, -1, &reply, sizeof(reply)) == 0 && reply.data_size > 0) {
         wire_send_all(fd, cursor.pixels, reply.data_size);
     }
-    drmtap_cursor_release(srv->ctx, &cursor);
+    drmtap_cursor_release(ctx, &cursor);
+}
+
+static void handle_list_displays(drmtap_server *srv, int fd) {
+    drmtap_server_list_reply_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.count = (uint32_t)srv->num_displays;
+    if (wire_send_all(fd, &hdr, sizeof(hdr)) != 0) {
+        return;
+    }
+    for (int i = 0; i < srv->num_displays; i++) {
+        drmtap_server_display_t out;
+        memset(&out, 0, sizeof(out));
+        out.id = (uint32_t)i;
+        out.crtc_id = srv->crtc_id[i];
+        snprintf(out.name, sizeof(out.name), "%s", srv->info[i].name);
+        out.x = srv->info[i].x;
+        out.y = srv->info[i].y;
+        out.width = srv->info[i].width;
+        out.height = srv->info[i].height;
+        out.refresh_hz = srv->info[i].refresh_hz;
+        if (wire_send_all(fd, &out, sizeof(out)) != 0) {
+            return;
+        }
+    }
 }
 
 /* Serve one connection until it disconnects, sends CMD_QUIT, or a framing
@@ -376,10 +419,13 @@ static void serve_connection(drmtap_server *srv, int fd) {
         }
         switch (hcmd.type) {
             case CMD_GRAB:
-                handle_grab(srv, fd);
+                handle_grab(srv, fd, hcmd.crtc_id);
                 break;
             case CMD_GET_CURSOR:
-                handle_get_cursor(srv, fd);
+                handle_get_cursor(srv, fd, hcmd.crtc_id);
+                break;
+            case CMD_LIST_DISPLAYS:
+                handle_list_displays(srv, fd);
                 break;
             case CMD_QUIT:
             default:
@@ -444,6 +490,7 @@ static void report_startup_result(drmtap_server *srv, int ok) {
 
 static void *worker_main(void *arg) {
     drmtap_server *srv = (drmtap_server *)arg;
+    drmtap_ctx *probe = NULL;
 
     // supress openat syscall from malloc
     mallopt(M_MMAP_THRESHOLD, -1);
@@ -460,10 +507,46 @@ static void *worker_main(void *arg) {
     dcfg.device_path = srv->device_path_set ? srv->device_path : NULL;
     dcfg.debug = srv->debug;
 
-    srv->ctx = drmtap_open(&dcfg);
-    if (!srv->ctx) {
+    probe = drmtap_open(&dcfg);
+    if (!probe) {
         set_error(srv, "drmtap_open failed: %s",
                   drmtap_error(NULL) ? drmtap_error(NULL) : "(unknown)");
+        report_startup_result(srv, 0);
+        goto cleanup;
+    }
+
+    // use probe context to list displays, close probe
+    drmtap_display disp[DRMTAP_SERVER_MAX_DISPLAYS];
+    int num_displays = drmtap_list_displays(probe, disp, DRMTAP_SERVER_MAX_DISPLAYS);
+    drmtap_close(probe);
+    probe = NULL;
+
+    if (num_displays <= 0) {
+        set_error(srv, "no active displays found");
+        report_startup_result(srv, 0);
+        goto cleanup;
+    }
+
+    srv->num_displays = 0;
+    for (int i = 0; i < num_displays; i++) {
+        drmtap_config c2 = dcfg;
+        c2.crtc_id = disp[i].crtc_id;
+        drmtap_ctx *c = drmtap_open(&c2);
+        if (!c) {
+            if (srv->debug) {
+                fprintf(stderr, "[drmtap_server] open crtc %u failed: %s, skipping\n",
+                      disp[i].crtc_id, drmtap_error(NULL) ? drmtap_error(NULL) : "");
+            }
+            continue;
+        }
+        srv->ctx[srv->num_displays] = c;
+        srv->crtc_id[srv->num_displays] = disp[i].crtc_id;
+        srv->info[srv->num_displays] = disp[i];
+        srv->num_displays++;
+    }
+
+    if (srv->num_displays == 0) {
+        set_error(srv, "could not open any display");
         report_startup_result(srv, 0);
         goto cleanup;
     }
@@ -501,10 +584,17 @@ cleanup:
     if (srv->socket_path[0]) {
         unlink(srv->socket_path);
     }
-    if (srv->ctx) {
-        drmtap_close(srv->ctx);
-        srv->ctx = NULL;
+    if (probe) {
+        drmtap_close(probe);
+        probe = NULL;
     }
+    for (int i = 0; i < srv->num_displays; i++) {
+        if (srv->ctx[i]) {
+            drmtap_close(srv->ctx[i]);
+            srv->ctx[i] = NULL;
+        }
+    }
+    srv->num_displays = 0;
     return NULL;
 }
 

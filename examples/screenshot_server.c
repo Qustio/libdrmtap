@@ -69,10 +69,47 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
-    // grab screen and save as image.ppm 
+    // list displays and pick the first one
+    uint32_t chosen_id = 0;
+    {
+        helper_cmd_grab_t lcmd = wire_cmd(CMD_LIST_DISPLAYS, 0);
+        if (wire_send_all(sock, &lcmd, sizeof(lcmd)) != 0) {
+            fprintf(stderr, "send CMD_LIST_DISPLAYS failed: %s", strerror(errno));
+            result = -1;
+            goto cleanup;
+        }
+
+        drmtap_server_list_reply_t hdr;
+        memset(&hdr, 0, sizeof(hdr));
+        if (wire_recv_all(sock, &hdr, sizeof(hdr)) != 0 || hdr.count == 0) {
+            fprintf(stderr, "recv CMD_LIST_DISPLAYS reply failed or no displays\n");
+            result = -1;
+            goto cleanup;
+        }
+
+        int got_first = 0;
+        for (uint32_t i = 0; i < hdr.count; i++) {
+            drmtap_server_display_t d;
+            memset(&d, 0, sizeof(d));
+            if (wire_recv_all(sock, &d, sizeof(d)) != 0) {
+                fprintf(stderr, "recv display entry failed\n");
+                result = -1;
+                goto cleanup;
+            }
+            fprintf(stderr, "display [%u] %s: %ux%u@%uHz at (%d,%d)\n",
+                    d.id, d.name, d.width, d.height, d.refresh_hz, d.x, d.y);
+            if (!got_first) {
+                chosen_id = d.id;
+                got_first = 1;
+            }
+        }
+    }
+
+    // grab screen and save as image.ppm
     {
         // send request
         helper_cmd_grab_t hcmd = wire_cmd(CMD_GRAB, 0);
+        hcmd.crtc_id = chosen_id; /* reused as display id for this protocol, not a real crtc id */
         if (wire_send_all(sock, &hcmd, sizeof(hcmd)) != 0) {
             fprintf(stderr, "send CMD_GRAB failed: %s", strerror(errno));
             result = -1;
@@ -147,8 +184,9 @@ int main(int argc, char *argv[]) {
     {
         // send request
         helper_cmd_grab_t hcmd = wire_cmd(CMD_GET_CURSOR, 0);
+        hcmd.crtc_id = chosen_id;
         if (wire_send_all(sock, &hcmd, sizeof(hcmd)) != 0) {
-            fprintf(stderr, "send CMD_GRAB failed: %s", strerror(errno));
+            fprintf(stderr, "send CMD_GET_CURSOR failed: %s", strerror(errno));
             result = -1;
             goto cleanup;
         }
@@ -156,8 +194,7 @@ int main(int argc, char *argv[]) {
         // wait reply
         drmtap_server_cursor_reply_t reply;
         memset(&reply, 0, sizeof(reply));
-        int fd = -1; // target fd
-        if (wire_recv_fd(sock, &reply, sizeof(reply), &fd)) {
+        if (wire_recv_all(sock, &reply, sizeof(reply))) {
             fprintf(stderr, "recv grab reply failed: %s", strerror(errno));
             result = -1;
             goto cleanup;

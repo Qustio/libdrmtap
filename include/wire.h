@@ -39,9 +39,10 @@
 #define HELPER_PROTO_VERSION 1u
 
 /* Command types (the `type` field of a command frame). */
-#define CMD_GRAB       0x01u
-#define CMD_GET_CURSOR 0x02u
-#define CMD_QUIT       0xFFu
+#define CMD_GRAB          0x01u
+#define CMD_GET_CURSOR    0x02u
+#define CMD_LIST_DISPLAYS 0x03u
+#define CMD_QUIT          0xFFu
 
 typedef struct {
     uint32_t magic;    /* HELPER_PROTO_MAGIC */
@@ -72,7 +73,8 @@ static inline int wire_cmd_valid(const helper_cmd_grab_t *c) {
     return c->magic == HELPER_PROTO_MAGIC &&
            c->version == HELPER_PROTO_VERSION &&
            c->length == (uint32_t)sizeof(helper_cmd_grab_t) &&
-           (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR || c->type == CMD_QUIT);
+           (c->type == CMD_GRAB || c->type == CMD_GET_CURSOR ||
+            c->type == CMD_LIST_DISPLAYS || c->type == CMD_QUIT);
 }
 
 /* Send exactly len bytes, handling partial writes and EINTR. 0 ok, -1 error. */
