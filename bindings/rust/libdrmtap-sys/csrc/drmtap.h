@@ -31,7 +31,7 @@ extern "C" {
  * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 5
+#define DRMTAP_VERSION_PATCH 7
 
 /**
  * @brief Get the library version as a packed integer.
@@ -57,12 +57,36 @@ typedef struct {
      *  0 = auto-select primary display. */
     uint32_t crtc_id;
 
-    /** Path to privileged helper binary.
-     *  NULL = search default locations:
-     *    1. $DRMTAP_HELPER_PATH (env var)
-     *    2. <exe_dir>/drmtap-helper
-     *    3. /usr/libexec/drmtap-helper
-     *    4. /usr/local/libexec/drmtap-helper */
+    /** Path to the privileged helper binary, used only when the direct DRM
+     *  export is denied (no CAP_SYS_ADMIN and not DRM master).
+     *
+     *  Checked first when set. NULL = search these, in this order, and take the
+     *  first one that is executable:
+     *    1. /usr/lib/rustdesk/drmtap-helper
+     *    2. /usr/libexec/drmtap-helper
+     *    3. /usr/local/libexec/drmtap-helper
+     *    4. /usr/local/bin/drmtap-helper
+     *    5. /usr/bin/drmtap-helper
+     *    6. /usr/lib/drmtap/drmtap-helper
+     *
+     *  The match is tested with access(X_OK) and then exec'd as-is: nothing
+     *  here checks its owner or its mode. So every directory on that list has
+     *  to be one only root can write, or a caller that later runs privileged
+     *  execs whatever was put there.
+     *
+     *  Setting this field does NOT opt out of that list: if the path given is
+     *  not executable, the search runs anyway and the helper still comes from
+     *  one of the six. The only way to not have the list is to build with
+     *  -Dhelper=disabled, which compiles the fork/exec path out of the library
+     *  entirely - no fork, exec or socketpair symbol is left in the .so - and
+     *  is what a consumer that already holds CAP_SYS_ADMIN should do.
+     *
+     *  Note for anyone who read an older header: it listed $DRMTAP_HELPER_PATH
+     *  and <exe_dir>/drmtap-helper. Neither was ever implemented - the
+     *  environment variable is not read anywhere in the library - and it
+     *  omitted four of the paths that ARE searched. Setting that variable
+     *  never did anything, and hardening only the two directories it named
+     *  left four open. */
     const char *helper_path;
 
     /** Enable debug logging to stderr.
@@ -486,9 +510,11 @@ typedef struct {
      * Hotspot within the cursor image, and `0` unless the driver exposes it:
      * `HOTSPOT_X`/`HOTSPOT_Y` are plane properties only para-virtualized drivers
      * (`virtio-gpu`, `vmwgfx`, `qxl`, `vboxvideo`) create, so on bare metal
-     * (i915, amdgpu, nvidia) these are always `0` — indistinguishable from a real
-     * top-left hotspot. See the cursor entry in the README's Known Limitations for
-     * the two ways to recover it, one of which is exact.
+     * (i915, amdgpu, nvidia) these are always `0`. Whether a `(0, 0)` here is a
+     * real hotspot or the absence of the properties is NOT visible in these two
+     * fields — ask `drmtap_cursor_hotspot_valid()`, which is the only way to tell
+     * them apart. See the cursor entry in the README's Known Limitations for the
+     * two ways to recover an absent hotspot, one of which is exact.
      */
     int32_t hot_x, hot_y;
     uint32_t width, height; /**< Cursor image dimensions */
@@ -515,6 +541,31 @@ typedef struct {
  * @return 0 on success (hidden included), negative errno on error
  */
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
+
+/**
+ * @brief Whether this cursor's hotspot was read from the driver, or is just zero.
+ *
+ * `hot_x`/`hot_y` cannot answer this on their own: a plane that does not expose
+ * `HOTSPOT_X`/`HOTSPOT_Y` leaves them at `(0, 0)`, which is also a perfectly
+ * legal hotspot for a driver that does expose them. A consumer that guesses the
+ * hotspot from the cursor bitmap when it reads `(0, 0)` therefore overrides a
+ * real measurement on any driver that reports a top-left hotspot; one that
+ * trusts `(0, 0)` instead puts the pointer at the image corner everywhere else.
+ * This tells the two apart, for the cursor sample in hand rather than by
+ * re-reading the properties (which could race with a shape change).
+ *
+ * BOTH properties must have been read for the hotspot to count as measured: a
+ * plane exposing only one of them is not a source of a hotspot, and a half-read
+ * pair would be a coordinate mixed with a zero.
+ *
+ * @param cursor A cursor filled by `drmtap_get_cursor()` and not yet released.
+ * @param valid  Set to 1 if the hotspot came from the properties, else 0.
+ * @return 0 on success; `-EINVAL` if either pointer is NULL; `-ENOTSUP` if this
+ *         sample carries no provenance at all, which is what a cursor filled by
+ *         a build older than this entry point looks like. `-ENOTSUP` means "no
+ *         answer", never "not measured" — do not fold it into `*valid`.
+ */
+int drmtap_cursor_hotspot_valid(const drmtap_cursor_info *cursor, int *valid);
 
 /**
  * @brief Release cursor resources.
