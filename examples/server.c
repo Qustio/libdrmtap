@@ -62,14 +62,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    drmtap_server_config cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.socket_path = socket_path;
-    cfg.expected_uid = expected_uid;
-    cfg.device_path = device_path;
-    cfg.debug = debug;
-
-    drmtap_server *srv = drmtap_server_start(&cfg);
+    drmtap_server *srv = drmtap_server_start_simple(socket_path, expected_uid, device_path, debug);
     if (!srv) {
         fprintf(stderr, "server: failed to start: %s\n",
                 drmtap_server_error(NULL) ? drmtap_server_error(NULL) : "(unknown)");
