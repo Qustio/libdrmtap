@@ -31,6 +31,13 @@ typedef struct {
 
 drmtap_server *drmtap_server_start(const drmtap_server_config *cfg);
 
+drmtap_server *drmtap_server_start_simple(
+    const char *socket_path,
+    uid_t expected_uid,
+    const char *device_path,
+    int debug
+);
+
 void drmtap_server_stop(drmtap_server *srv);
 
 const char *drmtap_server_error(drmtap_server *srv);

@@ -658,6 +658,22 @@ drmtap_server *drmtap_server_start(const drmtap_server_config *cfg) {
     return srv;
 }
 
+drmtap_server *drmtap_server_start_simple(
+    const char *socket_path,
+    uid_t expected_uid,
+    const char *device_path,
+    int debug
+) {
+    drmtap_server_config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.socket_path = socket_path;
+    cfg.expected_uid = expected_uid;
+    cfg.device_path = device_path;
+    cfg.debug = debug;
+    return drmtap_server_start(&cfg);
+}
+
+
 void drmtap_server_stop(drmtap_server *srv) {
     if (!srv) {
         return;
