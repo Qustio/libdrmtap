@@ -325,6 +325,88 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
     return result;
 }
 
+/* The DRM "rotation" property of the plane the last grab read from. Read now,
+ * so a consumer calls it right after the grab it wants to describe. The plane is
+ * the one do_grab or the fast path recorded (before any grab: the one a grab would
+ * use), never a fresh sweep, so the answer is for the same plane the frame came
+ * from. The property id is looked up by name once per plane and reused. */
+int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation) {
+    if (!ctx || !rotation) {
+        return -EINVAL;
+    }
+    if (ctx->is_render_only) {
+        return -ENOTSUP;
+    }
+    uint32_t plane_id = ctx->grab_plane_id ? ctx->grab_plane_id : find_primary_plane(ctx);
+    if (plane_id == 0) {
+        return -ENOENT;
+    }
+    if (plane_id != ctx->rot_prop_plane_id) {
+        /* A different plane may have a different property set: look it up again. */
+        ctx->rot_prop_plane_id = plane_id;
+        ctx->rot_prop_id = 0;
+        ctx->rot_prop_state = 0;
+    }
+    if (ctx->rot_prop_state < 0) {
+        return -ENOTSUP;
+    }
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(ctx->drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (!props) {
+        int err = errno ? errno : EIO;
+        drmtap_set_error(ctx, "plane %u properties: %s", plane_id, strerror(err));
+        return -err;
+    }
+    int found = 0;
+    int read_failed = 0;
+    uint64_t value = 0;
+    if (ctx->rot_prop_state == 0) {
+        /* First look at this plane: find the property by name and remember its id. */
+        for (uint32_t i = 0; i < props->count_props && !found; i++) {
+            drmModePropertyRes *p = drmModeGetProperty(ctx->drm_fd, props->props[i]);
+            if (!p) {
+                /* Unreadable, so "absent" cannot be concluded: keep the lookup pending. */
+                read_failed = errno ? errno : EIO;
+                continue;
+            }
+            if (strcmp(p->name, "rotation") == 0) {
+                ctx->rot_prop_id = props->props[i];
+                value = props->prop_values[i];
+                found = 1;
+            }
+            drmModeFreeProperty(p);
+        }
+        if (found) {
+            ctx->rot_prop_state = 1;
+        } else if (!read_failed) {
+            ctx->rot_prop_state = -1;
+        }
+    } else {
+        for (uint32_t i = 0; i < props->count_props; i++) {
+            if (props->props[i] == ctx->rot_prop_id) {
+                value = props->prop_values[i];
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            /* The property set changed under us: look it up by name next time. */
+            ctx->rot_prop_state = 0;
+            ctx->rot_prop_id = 0;
+        }
+    }
+    drmModeFreeObjectProperties(props);
+    if (found) {
+        *rotation = (uint32_t)value;
+        return 0;
+    }
+    if (read_failed) {
+        drmtap_set_error(ctx, "plane %u property read: %s", plane_id, strerror(read_failed));
+        return -read_failed;
+    }
+    return -ENOTSUP;
+}
+
 /* The connector HDR metadata for this CRTC, so the conversion path can tone-map.
  * Used to live at the end of find_primary_plane, which made a plane LOOKUP rewrite
  * ctx->cur_hdr_eotf as a side effect. That was invisible until the scanout-width
@@ -1100,6 +1182,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
                 drmtap_frame_release(ctx, frame);
                 return pret;
             }
+            /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
+            ctx->grab_plane_id = plane_id;
             return 0;
         }
 
@@ -1138,6 +1222,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
         }
 
         drmModeFreeFB2(fb2);
+        /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
+        ctx->grab_plane_id = plane_id;
         return 0;
     }
 
@@ -1262,6 +1348,8 @@ static int do_grab(drmtap_ctx *ctx, drmtap_frame_info *frame, int do_mmap) {
     }
 
     drmModeFreeFB2(fb2);
+    /* Only a grab that produced a frame names the plane drmtap_plane_rotation() answers for. */
+    ctx->grab_plane_id = plane_id;
     return 0;
 
 cleanup:
@@ -1675,6 +1763,9 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
     if (!ctx || !desc || !frame) {
         return -EINVAL;
     }
+    /* do_grab names the plane a frame came from; a frame this call refuses
+     * below never reaches the caller, so the name must not move either. */
+    uint32_t plane_before = ctx->grab_plane_id;
     int ret = do_grab(ctx, frame, 0);  /* zero-copy: DMA-BUF fd + metadata */
     if (ret != 0) {
         return ret;
@@ -1689,6 +1780,7 @@ int drmtap_grab_desc(drmtap_ctx *ctx, drmtap_dmabuf_desc *desc,
             "grab_desc needs a transferable DMA-BUF fd; this capture path "
             "returned pixels only (no exportable dma-buf)");
         drmtap_frame_release(ctx, frame);
+        ctx->grab_plane_id = plane_before;
         return -ENOTSUP;
     }
     /* Snapshot the full descriptor. The plane layout and HDR state are cached
@@ -1943,6 +2035,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
                 if (pr != 0) {
                     return pr;
                 }
+                ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
                 return 0;   /* always return as new frame */
             }
         }
@@ -2000,6 +2093,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
         if (pr != 0) {
             return pr;
         }
+
+        ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
 
         return 0;   /* new frame */
     }
@@ -2189,6 +2284,7 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
             if (pr != 0) {
                 return pr;
             }
+            ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
             return 0;
         }
 #endif
@@ -2270,6 +2366,8 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     if (mpr != 0) {
         return mpr;
     }
+
+    ctx->grab_plane_id = ctx->fast_plane_id; /* a frame came from it */
 
     return 0;   /* new frame */
 }

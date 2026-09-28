@@ -178,6 +178,13 @@ typedef struct {
 int drmtap_get_cursor(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 void drmtap_cursor_release(drmtap_ctx *ctx, drmtap_cursor_info *cursor);
 
+/* 0.5.8: the DRM "rotation" bitmask the primary plane scans out with, for the plane
+ * the last grab read from. -ENOTSUP when the plane has no such property, which a
+ * consumer treats as rotate-0: the compositor drew the scanout already turned, so the
+ * frame is turned back by the whole output transform. A plane that rotated or reflected
+ * already turned it on scanout: that frame is left alone. */
+int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation);
+
 // --- Display Hotplug Detection (v1) ---
 // Call after drmtap_grab*() returns -ENODEV or periodically to detect changes.
 // Returns 1 if display configuration changed since last call, 0 if unchanged.

@@ -6,6 +6,36 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.8] - 2026-09-25
+
+### Added: `drmtap_plane_rotation()`, the rotation property of the plane
+
+A captured frame is upright only when the compositor rotated the output in hardware:
+then the framebuffer holds the logical desktop and the plane turns it on scanout
+(i915 + mutter at 180, measured: the plane reports `rotate-180` and the dump is
+upright). When the plane cannot rotate (virtio-gpu, vmwgfx: no `rotation` property) the
+compositor draws the framebuffer already turned, so the capture comes out upside down
+at 180 and sideways at 90/270 (measured on virtio-gpu with a test pattern). `wl_output`
+cannot tell the two apart and neither can the frame. This call answers it from the
+kernel: the DRM rotation bitmask, or `-ENOTSUP` when the property does not exist,
+which a consumer treats as rotate-0. A frame from a plane that rotated or reflected is left
+alone; one from a plane at rotate-0 is turned by the whole output transform. The two are not
+subtracted: the compositor programs the plane from the CRTC transform, which also folds in
+the panel orientation that `wl_output` does not carry.
+`DrmTap::plane_rotation()` in the safe wrapper returns `Option<u32>`.
+
+It answers for the plane the last grab produced a frame from (do_grab and the fast path
+record it on their success paths only, and a `drmtap_grab_desc` that refuses a pixel-only
+frame restores the previous one), so the rotation always belongs to the frame it is called
+next to. The property id is looked up by name once per plane; a failed property read is
+not remembered as "absent", the next call looks again. The capture integration test reads
+it after a grab and expects exactly one ROTATE bit or `-ENOTSUP`.
+
+Measured before shipping: i915 with mutter reports `rotate-0` at 0 and `rotate-180` with
+one output at 180, the other output untouched; amdgpu with KWin at 180 stays `rotate-0`
+(KWin rotates in software, the scanout is upside down); appletbdrm (the Touch Bar) has no
+property and answers `-ENOTSUP`.
+
 ## [0.5.7] - 2026-09-20
 
 Mostly the Rust wrapper. No C code changed: the ABI and the helper wire protocol are
@@ -929,6 +959,7 @@ entry point is additive and would not on its own have justified more than a patc
   fixes.
 
 [0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
+[0.5.8]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.8
 [0.5.7]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.7
 [0.5.6]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.6
 [0.5.5]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.5
