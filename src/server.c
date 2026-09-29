@@ -90,7 +90,12 @@ static int drop_caps(void) {
 #ifdef HAVE_SECCOMP
 // Install seccomp filter allowing only needed syscalls
 static int install_seccomp(void) {
-    scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL_PROCESS); // SCMP_ACT_LOG
+    #ifdef NDEBUG
+    #define def_action SCMP_ACT_KILL_PROCESS
+    #else
+    #define def_action SCMP_ACT_LOG
+    #endif
+    scmp_filter_ctx ctx = seccomp_init(def_action);
     if (!ctx) {
         /* seccomp_init does not set errno; perror would print a stale value. */
         fprintf(stderr, "libdrmtap-server: seccomp_init failed\n"); return -1;
