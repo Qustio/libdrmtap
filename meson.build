@@ -365,7 +365,8 @@ endif # build_server
 # ============================================================================
 # Tests
 # ============================================================================
-
+build_tests = get_option('tests').enabled()
+if build_tests
 # Unit/integration tests link the STATIC lib (libdrmtap_test_dep) so they can
 # white-box internal helpers the version-scripted .so no longer exports.
 test_enumerate = executable('test_enumerate',
@@ -509,4 +510,5 @@ if libvncserver_dep.found()
         include_directories: lib_include,
         install: false,
     )
+endif
 endif

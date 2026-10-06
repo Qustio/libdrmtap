@@ -33,3 +33,6 @@ option('egl', type: 'feature', value: 'auto',
 
 option('server', type: 'feature', value: 'auto',
     description: 'Build libdrmtap_server')
+
+option('tests', type: 'feature', value: 'enabled',
+    description: 'Build tests')
