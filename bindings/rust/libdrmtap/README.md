@@ -77,11 +77,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   for the case where it must outlive the frame; it dups, because the frame closes its own on drop.
   The older `dma_buf_fd() -> i32` is deprecated: an integer expresses neither the ownership nor the
   lifetime, and `-1` in it means "no DMA-BUF" rather than being a descriptor
-- **`grab_mapped()`** — mmap'd pixel data (for software access)
+- **`grab_mapped()`** — pixel data for software access. Since 0.5.11 the next grab cannot overwrite
+  or free a frame's pixels: a conversion writes into a buffer the frame owns, pixels still in the
+  context's memory are copied into one, and a dropped frame leaves its buffer to the next grab. A
+  frame mapped straight from the scanout (a linear framebuffer) is a view of that buffer, not a copy
 - **`get_cursor()`** — cursor plane position (top-left of the image, in the CRTC's physical pixels) + ARGB image. On bare-metal drivers the hotspot reads `0`, and the `Cursor::hot_x` documentation gives the two ways to recover one. **`Cursor::hotspot_from_driver()`** (since 0.5.6) says whether that `0` is the driver's own answer: `Some(true)` means both `HOTSPOT_X` and `HOTSPOT_Y` were read, so `hot_x`/`hot_y` are the driver's coordinates even at `(0, 0)`; `Some(false)` means **at least one** was absent, so they carry no information and a hotspot has to be estimated; `None` means nothing recorded an answer for that sample, which is not the same as `Some(false)`
 - **`list_displays()`** — enumerate connected monitors
 - **`displays_changed()`** — hotplug detection
 - **`plane_rotation()`** (since 0.5.8): the DRM `rotation` bitmask the primary plane scans out with, read now, for the plane the last grab read from. `Some(0x1)` is rotate-0, `Some(0x4)` rotate-180 and so on (a reflection adds `0x10`/`0x20`). `None` means the plane has no `rotation` property: it cannot have turned the scanout, so treat it as rotate-0. No plane bound, or a property set that could not be read, is an `Err`. A frame from a plane at rotate-0 (or `None`) arrives turned by the whole output transform and has to be turned back by it; a frame from a plane that rotated or reflected is already upright and is left alone. Measured: mutter on i915 turns 180 in hardware (`0x4`, the scanout is upright); KWin on amdgpu turns in software (`0x1`, the scanout is upside down).
+- **`crtc_refresh()`** (since 0.5.9): the exact refresh of the captured CRTC, in hertz, as the reduced fraction `(num, den)` of its current mode. A 59.94 Hz 1080p mode reads `(148352, 2475)` and a 23.976 Hz one `(296704, 12375)`, where `Display::refresh_hz` rounds to 60 and 24. No connector probe: once the CRTC is known it is one mode read, so it can be called again to follow a mode change. `None` when the CRTC has no mode (disabled); an `Err` when it cannot be read. On a context opened with `crtc_id` 0 the first call picks the CRTC a grab would pick, and with no CRTC to pick that is an `Err` (ENOENT), not `None`. Measured on i915: `(60, 1)` at 1920x1080@60, `(6750000, 112463)` (60.0197 Hz) at 1280x1024, `(131375, 4382)` (29.9806 Hz) at 3840x2160@30.
 - **`Error::io_error()`** (since 0.5.7) — the error as an `io::Error` when it really is an errno.
   Not every negative return is one: `drmtap_drm_fd()` uses a bare `-1` as a sentinel, so that value
   answers `None` rather than being rendered as `EPERM`, an error nothing reported. The `code` field
@@ -108,7 +112,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   `libGLESv2.so.2` on first use, so the build needs their headers and **the
   target needs those runtime libraries** (`libegl1` and `libgles2` on
   Debian/Ubuntu). Without them the EGL detile is unavailable and only the CPU
-  paths remain, which do not cover every scanout. The crate
+  paths remain, which do not cover every scanout. Since 0.5.10 the library
+  never loads them in a setuid, setgid or file-capability process, so there the
+  EGL detile is unavailable too: grab through the helper from an unprivileged
+  process instead. The crate
   compiles its embedded C sources statically, so there is no system `libdrmtap`
   install required
 - For unprivileged capture: `drmtap-helper`, which `libdrmtap-sys` always builds

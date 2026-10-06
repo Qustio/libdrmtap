@@ -6,6 +6,117 @@ the `libdrmtap` wrapper crate all share ONE version. 0.5.0 declared that move an
 did not complete it - the wrapper still shipped 0.3.4 pinned to a `-sys` range that
 could not reach 0.5.0 - so the shared line only actually holds from 0.5.1.
 
+## [0.5.11] - 2026-10-05
+
+### Fixed: the pixels of a mapped frame could change under it at the next grab
+
+A converted frame (a tiled or compressed scanout, or a 10/16-bit format reduced to 8 bits)
+had its pixels in the conversion buffer of the context, and a frame from the pixel path of
+the privileged helper had them in the receive buffer of the context. `Frame::data()` handed
+that memory out with nothing tying it to the next grab, so the next grab overwrote it, and a
+larger frame freed and reallocated it under the slice (measured on i915: two live frames
+returned the same pointer, and a frame grabbed before a switch to a bigger mode was read from
+freed memory, under asan). The wrapper now points the conversion at a buffer the frame owns,
+through `drmtap_set_output_buffer()`, and copies pixels the context still owns into one. A
+dropped frame leaves its buffer to the next grab, so a consumer that drops one frame per grab
+does not allocate. A frame mapped straight from the scanout is still a view of it, not a copy.
+
+Measured on i915 (Meteor Lake, a compressed scanout through the EGL detile, as root):
+`grab_mapped` costs what it did in 0.5.10 within 0.1 ms, 4.6-4.8 ms at 1920x1080 and
+12.0-12.2 ms at 3840x2160, whether each frame is dropped before the next grab or held past
+it. The reused buffer keeps it flat where the allocator would not: with glibc forced to map
+every allocation fresh (`MALLOC_MMAP_THRESHOLD_=131072`), a new buffer per grab measured
+7.6 ms at 1080p and 29.4 ms at 4K, the reused one 4.7 and 12.1. The process keeps one frame
+more resident (8 MB at 1080p, 33 MB at 4K), and one more for each frame it holds.
+
+New in the C API: `drmtap_frame_owns_data()` tells a caller whether `frame->data` is memory
+the frame releases, or memory the next grab on the context may overwrite.
+
+### Fixed: `drmtap_deswizzle()` wrote past `dst` on a stride narrower than its rows
+
+It copies 4 bytes per pixel and never checked that a row fits `dst_stride`: on a 2-byte
+geometry (60 pixels on a 120-byte stride, `dst` sized `dst_stride * height`) the linear,
+X-tiled and Y-tiled paths all wrote past the end of `dst` (heap-buffer-overflow under asan).
+A layout it decodes now fails with `-EINVAL` before writing anything; one it cannot decode
+still answers `-ENOTSUP`.
+
+### Fixed: the Rust wrapper freed the context while a `Frame` still needed it (#63)
+
+`Frame` and `Cursor` kept a raw copy of the context pointer and no lifetime, so safe code
+could drop the `DrmTap` first: `drmtap_close` freed the context, and the release of the frame
+then read `drm_fd` from the freed memory to close its GEM handle (a heap-use-after-free under asan,
+measured on i915). The context now lives behind a shared handle that `DrmTap`, `Frame` and
+`Cursor` hold, and `drmtap_close` runs when the last of them is dropped. No signature changes:
+`DrmTap` is still `Send` and not `Sync`, and `Frame` and `Cursor` are still neither. The device
+stays open while a frame or cursor from it is alive, so a cached `Cursor` keeps it open, and
+dropping the last of them runs the close (on the privilege-helper path that stops the helper,
+about 100 ms).
+
+## [0.5.10] - 2026-10-01
+
+### Security: a setuid, setgid or file-capability binary ignores the environment and loads no GL
+
+When the library picks the card itself (no `device_path` in the config), it read
+`DRM_DEVICE` whenever the process was not root. A program that holds `CAP_SYS_ADMIN`
+through file capabilities, is setuid to a user other than root, or is setgid, runs
+with an environment the invoking user sets, so that user could choose which node it
+opens. The library now reads `DRM_DEVICE` and its own `DRMTAP_*` variables with
+`secure_getenv()`, which returns nothing in a setuid (root or not), setgid or
+file-capability binary. Root was already covered for `DRM_DEVICE` (0.4.11). A program
+can still turn on logging with `drmtap_config.debug`.
+
+In such a binary the library also no longer loads the GL libraries for the EGL detile:
+they are third-party code that reads its own environment variables. Grabs there take
+the paths of a build without EGL: a CPU deswizzle where one exists, a fail-closed error
+where none does (measured on i915: -ENOTSUP, with an error that names the cause), and a
+framebuffer that states no modifier is read as linear. 0.5.9 detiled in that process.
+A consumer that needs the detile runs unprivileged and grabs through the helper, which
+loads no GL. A process that runs as root without a setuid bit is unchanged.
+
+The README said `DRM_DEVICE` is ignored for "root / `CAP_SYS_ADMIN`" callers; it now
+names the cases the code covers. SECURITY.md said the variable cannot redirect which
+device the helper opens; in the helper model it can, because the helper opens the path
+the unprivileged library picked, and the helper still refuses anything outside
+`/dev/dri/`.
+
+## [0.5.9] - 2026-10-01
+
+### Added: `drmtap_crtc_refresh()`, the exact refresh of the captured CRTC
+
+`drmtap_display.refresh_hz` is the whole-hertz `vrefresh` of the mode, so on Linux 5.9
+and later the cinema and broadcast rates lose their fraction: 59.94 reads 60, 23.976
+reads 24, and timings that are not a whole number (1280x1024 at 60.02, a 3840x2160
+mode at 29.98) read as if they were. A consumer that paces capture to the panel needs
+the real rate.
+`drmtap_crtc_refresh(ctx, &num, &den)` returns it as the reduced fraction `num/den`
+hertz, computed from the current mode of the CRTC the way the kernel computes vrefresh
+(pixel clock over the horizontal and vertical totals, with interlace, doublescan and
+vscan) but not rounded. It is the rate the mode is programmed to: the kernel keeps the
+pixel clock in kHz, so a 1080p "59.94" mode at 148352 kHz reads `148352/2475`
+(59.94020 Hz), a few parts per million away from the nominal `60000/1001`.
+
+No connector is probed: once the CRTC is known it is one `DRM_IOCTL_MODE_GETCRTC`, so
+it can be called again to follow a mode change. On a context opened with `crtc_id` 0
+the first call also picks the CRTC a grab would pick, and keeps that choice: the grab
+and this call now share one helper for the auto-selection. `-ENODATA` when the CRTC
+has no mode (disabled); a CRTC that is only blanked keeps its mode and answers.
+`DrmTap::crtc_refresh()` in the safe wrapper returns `Result<Option<(u64, u64)>>`,
+`None` for a CRTC with no mode.
+
+Measured on i915: `60/1` for 1920x1080@60, `6750000/112463` (60.0197 Hz) for
+1280x1024 and `131375/4382` (29.9806 Hz) for 3840x2160@30, matching the mode timings
+in debugfs; `-ENODATA` on a disabled pipe; the auto-selected CRTC on a `crtc_id` 0
+context. The mode-to-fraction step is pure and unit-tested on CEA-861 timings (60,
+59.94, 50, 29.97, 23.976, 119.88, 1080i, doublescan, vscan) and on the widest values
+the mode fields allow.
+
+### Fixed: the wrapper compared errno by its x86 number
+
+`DrmTap::plane_rotation()` (0.5.8) recognised "no rotation property" as `-95`, which is
+`ENOTSUP` on x86 and ARM but not on SPARC, MIPS or PA-RISC, so there a plane without
+the property came back as an `Err` instead of `Ok(None)`. The wrapper now depends on
+`libc` and compares `ENOTSUP` and `ENODATA` by name.
+
 ## [0.5.8] - 2026-09-25
 
 ### Added: `drmtap_plane_rotation()`, the rotation property of the plane
@@ -958,13 +1069,16 @@ entry point is additive and would not on its own have justified more than a patc
 - amdgpu EGL detile fix, privileged-helper hardening, and a batch of full-audit
   fixes.
 
-[0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
+[0.5.11]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.11
+[0.5.10]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.10
+[0.5.9]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.9
 [0.5.8]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.8
 [0.5.7]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.7
 [0.5.6]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.6
 [0.5.5]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.5
 [0.5.4]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.4
 [0.5.3]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.3
+[0.5.2]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.2
 [0.5.1]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.1
 [0.5.0]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.5.0
 [0.4.15]: https://github.com/fxd0h/libdrmtap/releases/tag/v0.4.15

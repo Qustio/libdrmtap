@@ -25,13 +25,13 @@ extern "C" {
 /* Version                                                                   */
 /* ========================================================================= */
 
-/* Version of the C library. Kept equal to the libdrmtap-sys crate version
- * (the C sources packaged for Rust are the same code) and to the meson
- * project version; the unit tests cross-check all three. The higher-level
- * `libdrmtap` Rust wrapper crate carries its own, separate version line. */
+/* Version of the C library. Since 0.5.1 the C library, the meson project, the
+ * libdrmtap-sys crate (the same C sources, packaged for Rust) and the libdrmtap
+ * wrapper crate share this one version; tools/check-version.sh verifies every
+ * site. */
 #define DRMTAP_VERSION_MAJOR 0
 #define DRMTAP_VERSION_MINOR 5
-#define DRMTAP_VERSION_PATCH 8
+#define DRMTAP_VERSION_PATCH 11
 
 /**
  * @brief Get the library version as a packed integer.
@@ -79,7 +79,9 @@ typedef struct {
      *  one of the six. The only way to not have the list is to build with
      *  -Dhelper=disabled, which compiles the fork/exec path out of the library
      *  entirely - no fork, exec or socketpair symbol is left in the .so - and
-     *  is what a consumer that already holds CAP_SYS_ADMIN should do.
+     *  is what a consumer that already holds CAP_SYS_ADMIN as root should do
+     *  (since 0.5.10 a setuid, setgid or file-capability binary loads no GL, so
+     *  it gets no EGL detile in-process).
      *
      *  Note for anyone who read an older header: it listed $DRMTAP_HELPER_PATH
      *  and <exe_dir>/drmtap-helper. Neither was ever implemented - the
@@ -90,7 +92,8 @@ typedef struct {
     const char *helper_path;
 
     /** Enable debug logging to stderr.
-     *  Can also be enabled with DRMTAP_DEBUG=1 env var. */
+     *  Can also be enabled with DRMTAP_DEBUG=1 env var, except in a setuid,
+     *  setgid or file-capability binary (read with secure_getenv()). */
     int debug;
 } drmtap_config;
 
@@ -130,7 +133,9 @@ typedef struct {
     uint32_t y;             /**< Y offset in virtual FB (from CRTC) */
     uint32_t width;         /**< Current mode width in pixels */
     uint32_t height;        /**< Current mode height in pixels */
-    uint32_t refresh_hz;    /**< Vertical refresh rate */
+    uint32_t refresh_hz;    /**< Vertical refresh, the mode's whole-hertz
+                                 vrefresh: on Linux 5.9 and later 59.94 reads
+                                 60. drmtap_crtc_refresh() has the exact rate */
     int active;             /**< 1 = display is on, 0 = disabled */
 } drmtap_display;
 
@@ -264,6 +269,22 @@ int drmtap_grab_mapped_fast(drmtap_ctx *ctx, drmtap_frame_info *frame);
  * @param frame Frame to release
  */
 void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame);
+
+/**
+ * @brief Whether frame->data is memory the frame itself releases.
+ *
+ * Returns 1 when frame->data is the frame's own mapping, which stays valid until
+ * drmtap_frame_release() on that frame whatever the context does in between. Returns 0
+ * when it points into memory the frame does not own: the context's conversion buffer or
+ * the privileged helper's receive buffer, which the next grab on the same context
+ * overwrites and may reallocate, or a buffer set with drmtap_set_output_buffer(). A
+ * caller that keeps a frame's pixels past the next grab copies them when this is 0.
+ * Returns 0 for a NULL frame or a frame without data.
+ *
+ * @param frame Frame filled by a grab
+ * @return 1 if the frame owns its pixel data, 0 otherwise
+ */
+int drmtap_frame_owns_data(const drmtap_frame_info *frame);
 
 /* ========================================================================= */
 /* Split capture: privileged export + unprivileged convert                   */
@@ -634,6 +655,37 @@ const char *drmtap_gpu_driver(drmtap_ctx *ctx);
 int drmtap_plane_rotation(drmtap_ctx *ctx, uint32_t *rotation);
 
 /**
+ * @brief Exact refresh rate of the CRTC this context captures, as a fraction.
+ *
+ * The refresh in hertz is *num / *den, reduced. It is computed from the CRTC's
+ * current mode the way the kernel computes vrefresh (pixel clock over the
+ * horizontal and vertical totals, with interlace, doublescan and vscan) but is
+ * not rounded to whole hertz, so cinema and broadcast rates keep their value:
+ * a 1080p mode programmed at 148352 kHz reads 148352/2475 (59.94020 Hz) and one
+ * at 74176 kHz with a 2750 total 296704/12375 (23.97608 Hz), where
+ * drmtap_display.refresh_hz reads 60 and 24. This is the rate the mode is
+ * programmed to; the kernel stores the pixel clock in kHz, so it can differ from
+ * the nominal 60000/1001 or 24000/1001 by a few parts per million.
+ *
+ * No connector is probed: once the CRTC is known it is one
+ * DRM_IOCTL_MODE_GETCRTC, so it is cheap to call again to follow a mode change.
+ * On a context opened with crtc_id 0 the first call (unless a grab ran first)
+ * also picks the CRTC a grab would pick, and keeps that choice. With variable
+ * refresh (VRR) it is the mode's nominal rate, the fastest the panel goes. A
+ * CRTC that is only blanked (DPMS off) keeps its mode and still answers.
+ *
+ * @param ctx Capture context (not a drmtap_open_render() context)
+ * @param num Set to the numerator (hertz) on success
+ * @param den Set to the denominator on success, never 0
+ * @return 0 on success; -EINVAL for a NULL argument; -ENOTSUP for a render-only
+ *         context; -ENOENT when there is no CRTC with a mode to pick (or the
+ *         device resources cannot be read); -ENODATA when the CRTC has no mode
+ *         (disabled) or its mode has no timings; another negative errno if the
+ *         CRTC cannot be read. Added in 0.5.9.
+ */
+int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den);
+
+/**
  * @brief Get the underlying DRM file descriptor.
  *
  * Useful for advanced operations like drmWaitVBlank() to synchronize
@@ -713,11 +765,16 @@ int drmtap_set_output_buffer(drmtap_ctx *ctx, void *dst, size_t len);
  * a tiled buffer relabelled linear, reported as a valid frame.
  *
  * @param src        Source (tiled) pixel data
- * @param dst        Destination (linear) buffer (must be allocated by caller)
+ * @param dst        Destination (linear) buffer, allocated by the caller. Row y
+ *                   gets width * 4 bytes at y * dst_stride and the rest of the
+ *                   row is left as it was, so dst can be a rectangle inside a
+ *                   wider image
  * @param width      Frame width in pixels
  * @param height     Frame height in pixels
  * @param src_stride Source stride (bytes per row in tiled data)
- * @param dst_stride Destination stride (bytes per row)
+ * @param dst_stride Destination stride (bytes per row). Pixels are 4 bytes: a
+ *                   layout this decodes fails with -EINVAL, before writing
+ *                   anything, on a stride narrower than width * 4
  * @param modifier   DRM format modifier (e.g., I915_FORMAT_MOD_X_TILED)
  * @param src_size   Size of the source buffer in bytes; reads are bounded by it
  *                   (a scanout whose height is not a tile multiple would

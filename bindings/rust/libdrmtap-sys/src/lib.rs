@@ -157,6 +157,9 @@ extern "C" {
     pub fn drmtap_grab(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info) -> c_int;
     pub fn drmtap_grab_mapped(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info) -> c_int;
     pub fn drmtap_frame_release(ctx: *mut drmtap_ctx, frame: *mut drmtap_frame_info);
+    /// 1 when `frame.data` is the frame's own mapping, valid until `drmtap_frame_release`;
+    /// 0 when it is context-owned or caller-owned memory that the next grab may overwrite.
+    pub fn drmtap_frame_owns_data(frame: *const drmtap_frame_info) -> c_int;
 
     /// Point the conversion paths at a caller-owned buffer instead of a
     /// library-owned one, so a consumer that must end up with the pixels in its own
@@ -197,6 +200,12 @@ extern "C" {
     /// `0` on success, `-ENOTSUP` when the plane has no such property, `-ENOENT`
     /// when no primary plane is bound, `-EINVAL` on a null argument. Added in 0.5.8.
     pub fn drmtap_plane_rotation(ctx: *mut drmtap_ctx, rotation: *mut u32) -> c_int;
+    /// The exact refresh of the captured CRTC in hertz, as the reduced fraction
+    /// `*num / *den` of its current mode (59.94 Hz reads `148352/2475` where
+    /// `refresh_hz` reads 60). `0` on success, `-ENODATA` when the CRTC has no mode,
+    /// `-ENOENT` when there is no CRTC with a mode to pick, `-ENOTSUP` for a render-only
+    /// context, `-EINVAL` on a null argument. Added in 0.5.9.
+    pub fn drmtap_crtc_refresh(ctx: *mut drmtap_ctx, num: *mut u64, den: *mut u64) -> c_int;
 
     // Pixel conversion
     pub fn drmtap_deswizzle(

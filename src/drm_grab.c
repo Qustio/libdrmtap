@@ -36,6 +36,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -105,7 +106,7 @@ static void close_auxiliary_gem_handles(drmtap_ctx *ctx, const drmModeFB2 *fb2) 
 static int drmtap_force_mmap_fail(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("DRMTAP_FORCE_MMAP_FAIL");
+        const char *e = secure_getenv("DRMTAP_FORCE_MMAP_FAIL");
         v = (e && e[0] == '1') ? 1 : 0;
     }
     return v;
@@ -230,6 +231,32 @@ static void read_hdr_metadata_direct(drmtap_ctx *ctx, uint32_t crtc_id) {
     }
 }
 
+/* A context opened with crtc_id 0 captures the first CRTC that has a mode. It is chosen
+ * once and kept in ctx->crtc_id, so every later call answers for the same CRTC. */
+static uint32_t select_first_active_crtc(drmtap_ctx *ctx) {
+    drmModeRes *res = drmModeGetResources(ctx->drm_fd);
+    if (!res) {
+        return 0;
+    }
+    uint32_t chosen = 0;
+    for (int i = 0; i < res->count_crtcs && chosen == 0; i++) {
+        drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, res->crtcs[i]);
+        if (!crtc) {
+            continue;
+        }
+        if (crtc->mode_valid) {
+            chosen = crtc->crtc_id;
+        }
+        drmModeFreeCrtc(crtc);
+    }
+    drmModeFreeResources(res);
+    if (chosen != 0) {
+        ctx->crtc_id = chosen;
+        drmtap_debug_log(ctx, "auto-selected CRTC %u", chosen);
+    }
+    return chosen;
+}
+
 // Find the primary plane attached to the target CRTC
 // Returns the plane_id or 0 on failure
 static uint32_t find_primary_plane(drmtap_ctx *ctx) {
@@ -245,23 +272,7 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
 
     /* If no CRTC selected, pick the first active one */
     if (target_crtc == 0) {
-        drmModeRes *res = drmModeGetResources(ctx->drm_fd);
-        if (res) {
-            for (int i = 0; i < res->count_crtcs; i++) {
-                drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, res->crtcs[i]);
-                if (crtc) {
-                    if (crtc->mode_valid) {
-                        target_crtc = crtc->crtc_id;
-                        ctx->crtc_id = target_crtc;
-                        drmtap_debug_log(ctx, "auto-selected CRTC %u", target_crtc);
-                        drmModeFreeCrtc(crtc);
-                        break;
-                    }
-                    drmModeFreeCrtc(crtc);
-                }
-            }
-            drmModeFreeResources(res);
-        }
+        target_crtc = select_first_active_crtc(ctx);
     }
 
     if (target_crtc == 0) {
@@ -323,6 +334,37 @@ static uint32_t find_primary_plane(drmtap_ctx *ctx) {
 
     drmModeFreePlaneResources(planes);
     return result;
+}
+
+/* The exact refresh of the captured CRTC, from its current mode. No connector probe:
+ * once the CRTC is known it is one GETCRTC, so a caller can ask again to follow a
+ * mode change. */
+int drmtap_crtc_refresh(drmtap_ctx *ctx, uint64_t *num, uint64_t *den) {
+    if (!ctx || !num || !den) {
+        return -EINVAL;
+    }
+    if (ctx->is_render_only) {
+        drmtap_set_error(ctx, "crtc refresh: a render-only context has no CRTC");
+        return -ENOTSUP;
+    }
+    uint32_t crtc_id = ctx->crtc_id ? ctx->crtc_id : select_first_active_crtc(ctx);
+    if (crtc_id == 0) {
+        drmtap_set_error(ctx, "crtc refresh: no CRTC with a mode to pick");
+        return -ENOENT;
+    }
+    drmModeCrtc *crtc = drmModeGetCrtc(ctx->drm_fd, crtc_id);
+    if (!crtc) {
+        int err = errno ? errno : EIO;
+        drmtap_set_error(ctx, "crtc %u: %s", crtc_id, strerror(err));
+        return -err;
+    }
+    int rc = crtc->mode_valid ? drmtap_mode_refresh(&crtc->mode, num, den) : -ENODATA;
+    drmModeFreeCrtc(crtc);
+    if (rc != 0) {
+        drmtap_set_error(ctx, "crtc %u has no mode with timings", crtc_id);
+        return -ENODATA;
+    }
+    return 0;
 }
 
 /* The DRM "rotation" property of the plane the last grab read from. Read now,
@@ -1641,6 +1683,13 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                                    frame->width, frame->height,
                                    frame->stride, frame->stride, modifier,
                                    (size_t)frame->stride * frame->height);
+        if (ret == -EINVAL) {
+            drmtap_set_error(ctx,
+                "CPU deswizzle copies 4-byte pixels, and a %u-pixel row does not fit "
+                "the %u-byte stride of format 0x%08x", frame->width, frame->stride,
+                frame->format);
+            return ret;
+        }
         if (ret == -ENOTSUP) {
             /* CCS-compressed (or otherwise unsupported) modifier -- the CPU
              * deswizzle cannot decode it and no EGL path produced linear pixels
@@ -1655,8 +1704,17 @@ static int gpu_auto_process(drmtap_ctx *ctx, void *data,
                 (unsigned long)modifier);
 #ifdef HAVE_EGL
             /* EGL IS compiled in, so the detile was skipped or it failed at
-             * runtime: no dma-buf fd on this path (helper V2 pixel mode), or no
-             * usable render node. Point at that, not at the build. */
+             * runtime: GL is not loaded in a setuid, setgid or file-capability
+             * process; otherwise no dma-buf fd on this path (helper V2 pixel mode),
+             * or no usable render node. Point at that, not at the build. */
+            if (getauxval(AT_SECURE)) {
+                drmtap_set_error(ctx,
+                    "scanout modifier 0x%lx needs a GPU detile, and GL is not loaded "
+                    "in a setuid, setgid or file-capability process: grab through the "
+                    "helper from an unprivileged process instead",
+                    (unsigned long)modifier);
+                return -ENOTSUP;
+            }
             drmtap_set_error(ctx,
                 "scanout modifier 0x%lx needs a GPU detile, and the EGL detile "
                 "this build carries was unavailable or failed: no dma-buf fd on "
@@ -1860,6 +1918,14 @@ void drmtap_frame_release(drmtap_ctx *ctx, drmtap_frame_info *frame) {
     /* Zero out the frame to prevent double-free */
     memset(frame, 0, sizeof(*frame));
     frame->dma_buf_fd = -1;
+}
+
+int drmtap_frame_owns_data(const drmtap_frame_info *frame) {
+    if (!frame || !frame->data) {
+        return 0;
+    }
+    const frame_priv_t *priv = (const frame_priv_t *)frame->_priv;
+    return priv && priv->mapped && frame->data == priv->mapped;
 }
 
 /* ========================================================================= */
