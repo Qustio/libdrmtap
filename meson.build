@@ -307,6 +307,8 @@ endif # build_helper
 build_server = get_option('server').enabled()
 
 if build_server
+seccomp_dep = dependency('libseccomp', required: true)
+libcap_dep = dependency('libcap', required: true)
 server_deps = [libdrm_dep, seccomp_dep, libcap_dep]
 server_c_args = ['-DHAVE_SECCOMP=1', '-DHAVE_LIBCAP=1']
 
@@ -341,8 +343,8 @@ libdrmtap_server_dep = declare_dependency(
 executable('server',
     'examples/server.c',
     dependencies: [libdrmtap_server_dep],
-    c_args: helper_c_args,
-    link_args: helper_link_args,
+    c_args: server_c_args,
+    link_args: server_link_args,
     pie: true,
     install: true,
     install_dir: get_option('libexecdir'),
@@ -352,8 +354,8 @@ executable('server',
 executable('screenshot_server',
     'examples/screenshot_server.c',
     dependencies: [libdrmtap_server_dep, libdrmtap_dep],
-    c_args: helper_c_args,
-    link_args: helper_link_args,
+    c_args: server_c_args,
+    link_args: server_link_args,
     pie: true,
     install: true,
     install_dir: get_option('libexecdir'),
