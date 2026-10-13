@@ -117,7 +117,7 @@ static int install_seccomp(void) {
         SCMP_SYS(fstat), SCMP_SYS(newfstatat), SCMP_SYS(fcntl),
         SCMP_SYS(exit_group), SCMP_SYS(exit), SCMP_SYS(rt_sigreturn),
         SCMP_SYS(clock_gettime),
-        SCMP_SYS(accept4), SCMP_SYS(poll), SCMP_SYS(getsockopt),
+        SCMP_SYS(accept4), SCMP_SYS(poll), SCMP_SYS(ppoll), SCMP_SYS(getsockopt),
         SCMP_SYS(futex), SCMP_SYS(unlink), SCMP_SYS(unlinkat),
         SCMP_SYS(madvise), SCMP_SYS(rt_sigprocmask)
     };
