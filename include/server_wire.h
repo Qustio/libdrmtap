@@ -43,6 +43,10 @@ typedef struct {
     uint8_t  status;         /* DRMTAP_SERVER_GRAB_* */
     uint8_t  _pad[7];        /* keep `desc` 8-byte aligned on the wire */
     drmtap_dmabuf_desc desc; /* valid only when status == OK */
+    uint32_t plane_rotation; /* DRM_MODE_ROTATE_/REFLECT_ bitmask from
+                                drmtap_plane_rotation(), valid only when
+                                status == OK. ROTATE_0 (0x1) when the plane
+                                has no rotation property (-ENOTSUP). */
 } drmtap_server_grab_reply_t;
 
 typedef struct {

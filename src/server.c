@@ -329,10 +329,15 @@ static void handle_grab(drmtap_server *srv, int fd, size_t screen_id) {
     int gret = drmtap_grab_desc(ctx, &reply.desc, &frame);
     int fd_to_send = -1;
     if (gret == 0) {
-        reply.status = DRMTAP_SERVER_GRAB_OK;   
+        reply.status = DRMTAP_SERVER_GRAB_OK;
         fd_to_send = reply.desc.dma_buf_fd; /* may be -1: an import-once cache
                                                 hit for an fb_id the consumer
                                                 already imported needs no fd */
+        uint32_t rotation = 0;
+        if (drmtap_plane_rotation(ctx, &rotation) != 0) {
+            rotation = 1; /* DRM_MODE_ROTATE_0: no rotation property, treat as unrotated */
+        }
+        reply.plane_rotation = rotation;
     } else {
         reply.status = DRMTAP_SERVER_GRAB_ERROR;
         if (srv->debug) {
