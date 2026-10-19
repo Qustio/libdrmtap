@@ -43,6 +43,7 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/prctl.h>
+#include <sys/ioctl.h>
 #include <linux/dma-buf.h>
 #ifdef HAVE_LIBCAP
 #include <sys/capability.h>
@@ -228,6 +229,38 @@ const char *drmtap_server_error(drmtap_server *srv) {
     return g_static_error[0] ? g_static_error : NULL;
 }
 
+const char SEP = '/';
+
+static int recurse_mkdir(const char *dirname, const mode_t mode) {
+    char *temp = calloc(1, strlen(dirname) + 1);
+    if (!temp)
+        return 0;
+    const char *p = dirname;
+    int ret = 1;
+
+    while ((p = strchr(p, SEP)) != NULL) {
+        if (p == dirname || *(p - 1) == SEP) {
+            p++;
+            continue;
+        }
+        memcpy(temp, dirname, p - dirname);
+        temp[p - dirname] = '\0';
+        if (mkdir(temp, mode) != 0 && errno != EEXIST) {
+            ret = 0;
+            goto out;
+        }
+        p++;
+    }
+    /* no trailing separator to trigger the last component above */
+    if (mkdir(dirname, mode) != 0 && errno != EEXIST) {
+        ret = 0;
+    }
+out:
+    free(temp);
+    return ret;
+}
+
+
 /* ========================================================================= */
 /* Socket setup                                                              */
 /* ========================================================================= */
@@ -247,10 +280,10 @@ static int ensure_parent_dir(const char *path) {
     if (stat(buf, &st) == 0) {
         return S_ISDIR(st.st_mode) ? 0 : -1;
     }
-    if (mkdir(buf, 0755) == 0) {
+    if (recurse_mkdir(buf, 0755) == 0) {
         return 0;
     }
-    return (errno == EEXIST) ? 0 : -1;
+    return recurse_mkdir(buf, 0755) ? 0 : -1;
 }
 
 /* World-connectable (0666) on purpose: access control is enforced in code
