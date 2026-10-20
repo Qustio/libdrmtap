@@ -38,6 +38,13 @@ drmtap_server *drmtap_server_start_simple(
     int debug
 );
 
+/**
+ * @brief Checks if drm capture supported
+ * 
+ * @return 0 - works, -ENODEV(-19) - not supported any other returned value - try again
+ */
+int drmtap_probe();
+
 void drmtap_server_stop(drmtap_server *srv);
 
 const char *drmtap_server_error(drmtap_server *srv);

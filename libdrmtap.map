@@ -43,6 +43,7 @@
         drmtap_diff_frames;
         drmtap_server_start;
         drmtap_server_start_simple;
+        drmtap_probe;
         drmtap_server_stop;
         drmtap_server_error;
     local:

@@ -25,6 +25,7 @@
  * no RustDesk-style multi-connection/credit-flow-control machinery here.
  */
 
+#include <asm-generic/errno-base.h>
 #define _GNU_SOURCE
 #include "drmtap_server.h"
 #include "server_wire.h"
@@ -716,6 +717,19 @@ drmtap_server *drmtap_server_start_simple(
     return drmtap_server_start(&cfg);
 }
 
+int drmtap_probe() {
+    drmtap_config cfg = {0};
+    drmtap_ctx* ctx = drmtap_open(&cfg);
+    if (!ctx)
+        return -ENODEV;
+    drmtap_dmabuf_desc desc;
+    drmtap_frame_info frame;
+    int rc = drmtap_grab_desc(ctx, &desc, &frame);
+    if (rc == 0)
+        drmtap_frame_release(ctx,&frame);
+    drmtap_close(ctx);
+    return rc;
+}
 
 void drmtap_server_stop(drmtap_server *srv) {
     if (!srv) {
